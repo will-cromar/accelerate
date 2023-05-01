@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import defaultdict
 import os
+import threading
 import warnings
 from contextlib import contextmanager
 from functools import partial
 from typing import Any, Callable, Optional
 
 import torch
+from torch_xla.experimental import pjrt
 
 from .utils import (
     DistributedType,
@@ -46,16 +49,40 @@ def is_initialized() -> bool:
     Checks if the `AcceleratorState` has been initialized from `Accelerator`. Same as `AcceleratorState.initialized`,
     but works as a module method.
     """
-    return AcceleratorState._shared_state != {}
+    return Singleton.is_initialized(AcceleratorState)
 
 
 # Lambda function that does nothing
 def do_nothing(*args, **kwargs):
     return None
 
+class Singleton(type):
+    _local = threading.local()
+    _locks = defaultdict(threading.Lock)
+
+    def __call__(cls, *args, **kwargs):
+      if not hasattr(cls._local, 'instances'):
+        with cls._locks[cls]:
+          cls._local.instances = {}
+
+      if cls not in cls._local.instances:
+        with cls._locks[cls]:
+          if cls not in cls._local.instances:
+            cls._local.instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
+      return cls._local.instances[cls]
+
+    @classmethod
+    def is_initialized(cls, singleton):
+      return singleton in cls._local.instances
+
+    @classmethod
+    def reset(cls, singleton):
+      with cls._locks[cls]:
+        if cls._local.instances:
+          cls._local.instances.pop(singleton, None)
 
 # Inspired by Alex Martelli's 'Borg'.
-class PartialState:
+class PartialState(metaclass=Singleton):
     """
     Singleton class that has information about the current training environment and functions to help with process
     control. Designed to be used when only process control and device execution states are needed. Does *not* need to
@@ -76,10 +103,8 @@ class PartialState:
         - **is_local_main_process** (`bool`) -- Whether or not the current process is the main one on the local node.
     """
 
-    _shared_state = {}
 
     def __init__(self, cpu: bool = False, **kwargs):
-        self.__dict__ = self._shared_state
         if not self.initialized:
             self._cpu = cpu
             self.backend = None
@@ -205,15 +230,15 @@ class PartialState:
             f"Device: {self.device}\n"
         )
 
-    @staticmethod
-    def _reset_state():
+    @classmethod
+    def _reset_state(cls):
         "Resets `_shared_state`, is used internally and should not be called"
-        PartialState._shared_state = {}
+        Singleton.reset(cls)
 
     @property
     def initialized(self) -> bool:
         "Returns whether the `PartialState` has been initialized"
-        return self._shared_state != {}
+        return Singleton.is_initialized(self.__class__)
 
     @property
     def use_distributed(self):
@@ -505,7 +530,7 @@ class PartialState:
             return torch.device("cpu")
 
 
-class AcceleratorState:
+class AcceleratorState(metaclass=Singleton):
     """
     Singleton class that has information about the current training environment.
 
@@ -525,8 +550,6 @@ class AcceleratorState:
         - **is_local_main_process** (`bool`) -- Whether or not the current process is the main one on the local node.
     """
 
-    _shared_state = {}
-
     def __init__(
         self,
         mixed_precision: str = None,
@@ -539,12 +562,12 @@ class AcceleratorState:
         _from_accelerator: bool = False,
         **kwargs,
     ):
-        self.__dict__ = self._shared_state
         if parse_flag_from_env("ACCELERATE_USE_CPU"):
             cpu = True
-        if PartialState._shared_state == {}:
-            PartialState(cpu, **kwargs)
-        self.__dict__.update(PartialState._shared_state)
+        ps = PartialState(cpu, **kwargs)
+        # print(ps)
+        # TODO: fix
+        self.__dict__ = ps.__dict__
         self._check_initialized(mixed_precision, cpu)
         if not self.initialized:
             self.deepspeed_plugin = None
@@ -597,11 +620,11 @@ class AcceleratorState:
                 and self.device.type == "cuda"
             ):
                 torch.backends.cuda.matmul.allow_tf32 = True
-            PartialState._shared_state["distributed_type"] = self.distributed_type
+            PartialState.distributed_type = self.distributed_type
 
     @property
     def initialized(self) -> bool:
-        return self._shared_state != PartialState._shared_state
+        return Singleton.is_initialized(self.__class__)
 
     def __repr__(self):
         repr = PartialState().__repr__() + f"\nMixed precision type: {self.mixed_precision}\n"
@@ -646,10 +669,10 @@ class AcceleratorState:
             mixed_precision = self._mixed_precision
         return mixed_precision
 
-    @staticmethod
-    def _reset_state(reset_partial_state: bool = False):
+    @classmethod
+    def _reset_state(cls, reset_partial_state: bool = False):
         "Resets `_shared_state`, is used internally and should not be called"
-        AcceleratorState._shared_state = {}
+        Singleton.reset(cls)
         if reset_partial_state:
             PartialState._reset_state()
 
