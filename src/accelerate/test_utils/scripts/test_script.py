@@ -59,6 +59,8 @@ def process_execution_check():
 
     # Test main_process_first context manager
     path = Path("check_main_process_first.txt")
+
+    # Suppress `FileNoteFound` when another process deletes the file first
     with contextlib.suppress(FileNotFoundError):
         path.unlink()
 
