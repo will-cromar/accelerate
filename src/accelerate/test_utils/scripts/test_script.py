@@ -53,18 +53,14 @@ def print_on(state, process_idx):
     print(f"Printing from process {process_idx}: {state.process_index}")
 
 
-def ensure_deleted(path: Path):
-  with contextlib.suppress(FileNotFoundError):
-    path.unlink()
-
-
 def process_execution_check():
     accelerator = Accelerator()
     num_processes = accelerator.num_processes
 
     # Test main_process_first context manager
     path = Path("check_main_process_first.txt")
-    ensure_deleted(path)
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
 
     # Prevent other processes from deleting file after main has written to it
     accelerator.wait_for_everyone()
@@ -89,10 +85,12 @@ def process_execution_check():
                 text.count("Now on another process\n") == num_processes - 1
             ), f"Only wrote to file {text.count('Now on another process') + 1} times, not {num_processes}"
         except AssertionError:
-            ensure_deleted(path)
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
             raise
 
-    ensure_deleted(path)
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
 
     # Test the decorators
     f = io.StringIO()
